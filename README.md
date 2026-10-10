@@ -3,7 +3,16 @@
 A compact racing dashboard overlay for **Automobilista 2** on Linux (Wayland). It reads
 the game's UDP telemetry and draws a small panel on top of the game.
 
-![Overlay preview](docs/preview.png)
+![The overlay in game](docs/ingame.webp)
+
+<p>
+  <img src="docs/preview.png" width="280" alt="Overview">
+  <img src="docs/context-menu.png" width="280" alt="Right click menu">
+  <img src="docs/radar-side-by-side.png" width="280" alt="Radar: car alongside">
+  <img src="docs/radar-approaching.png" width="280" alt="Radar: car approaching">
+  <img src="docs/flag-yellow.png" width="280" alt="Yellow flag">
+  <img src="docs/flag-double-yellow.png" width="280" alt="Double yellow flag">
+</p>
 
 ## What it shows
 
