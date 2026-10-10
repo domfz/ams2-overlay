@@ -116,4 +116,4 @@ remains. Options:
 
 ## License
 
-Not decided yet.
+[MIT](LICENSE)
