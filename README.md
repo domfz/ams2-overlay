@@ -59,7 +59,12 @@ python3 ams2_overlay.py --demo
 ```
 
 **Moving it:** press and hold the panel, then drag it. The position is saved per
-monitor in `~/.config/ams2-overlay/position.json`. **Right click** closes the overlay.
+monitor in `~/.config/ams2-overlay/position.json`.
+
+**Right click** opens a menu to switch parts on or off (proximity radar, flags, pedal
+arcs, engine arcs, brake discs, damage), lock the position so it can't be dragged by
+accident, or close the overlay. These choices are saved in
+`~/.config/ams2-overlay/settings.json`.
 
 | Option | Default | Description |
 |---|---|---|

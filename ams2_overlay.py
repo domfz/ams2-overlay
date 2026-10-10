@@ -784,6 +784,37 @@ def flag_leds(flag, now, n):
     return None
 
 
+def load_json(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_json(path, data):
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(data, f)
+    except OSError as e:
+        print(f"could not save {path}: {e}", file=sys.stderr)
+
+
+# right click menu: (setting, label) toggles, then "Close overlay"
+MENU_TOGGLES = (
+    ("radar", "Proximity radar"),
+    ("flags", "Flags"),
+    ("pedals", "Pedal arcs"),
+    ("engine", "Engine arcs"),
+    ("brakes", "Brake discs"),
+    ("damage", "Damage"),
+    ("locked", "Lock position"),
+)
+DEFAULT_SHOW = {key: key != "locked" for key, _ in MENU_TOGGLES}
+MENU_W, MENU_ROW, MENU_PAD = 168, 22, 6
+
+
 def rpm_color(frac):
     if frac < 0.80:
         return GREEN
@@ -823,6 +854,11 @@ class Gauge(Gtk.DrawingArea):
         self.flags = FlagTracker()
         self.drag_armed = False  # outline while held for moving
         self.drag_offset = None  # panel position inside the monitor while dragging
+        self.show = DEFAULT_SHOW | {
+            k: v for k, v in load_json(SETTINGS_FILE).items() if k in DEFAULT_SHOW}
+        self.menu = None  # (x, y) of the open right click menu, panel coordinates
+        self.menu_hover = None  # index of the row under the pointer
+        self.menu_closed_at = 0.0
         self.set_content_width(int(self.W * scale))
         self.set_content_height(int(self.H * scale))
         self.set_draw_func(self.draw)
@@ -857,7 +893,7 @@ class Gauge(Gtk.DrawingArea):
 
     def static_layer(self, max_rpm):
         """Panel background, scale, labels and bar tracks, cached per car."""
-        key = (max_rpm, self.units, self.scale)
+        key = (max_rpm, self.units, self.scale, self.show["pedals"], self.show["engine"])
         if self.static and self.static[0] == key:
             return self.static[1]
         surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, math.ceil(self.W * self.scale),
@@ -875,17 +911,19 @@ class Gauge(Gtk.DrawingArea):
         cr.set_source_rgba(*TRACK)
         cr.arc(cx, cy, r, ARC_START, ARC_START + ARC_SWEEP)
         cr.stroke()
-        # pedal arc tracks
+        # pedal and engine arc tracks
         cr.set_line_width(3)
         cr.set_source_rgba(*TRACK)
         for pr in self.PEDAL_R:
-            cr.new_path()
-            cr.arc_negative(cx, cy, pr, self.PEDAL_START,
-                            self.PEDAL_START - self.PEDAL_SWEEP)
-            cr.stroke()
-            cr.new_path()
-            cr.arc(cx, cy, pr, self.ENGINE_START, self.ENGINE_START + self.PEDAL_SWEEP)
-            cr.stroke()
+            if self.show["pedals"]:
+                cr.new_path()
+                cr.arc_negative(cx, cy, pr, self.PEDAL_START,
+                                self.PEDAL_START - self.PEDAL_SWEEP)
+                cr.stroke()
+            if self.show["engine"]:
+                cr.new_path()
+                cr.arc(cx, cy, pr, self.ENGINE_START, self.ENGINE_START + self.PEDAL_SWEEP)
+                cr.stroke()
         # tick labels (thousands)
         for k in range(max_rpm // 1000 + 1):
             a = ARC_START + ARC_SWEEP * (k * 1000 / max_rpm)
@@ -995,6 +1033,99 @@ class Gauge(Gtk.DrawingArea):
                 rounded_rect(cr, mid + k - 1.5, 109, 3, 4, 1)
                 cr.fill()
 
+    def menu_rect(self):
+        """(x, y, w, h) of the open menu, kept inside the panel."""
+        rows = len(MENU_TOGGLES) + 1
+        h = rows * MENU_ROW + 2 * MENU_PAD + 9  # + separator before "Close"
+        x, y = self.menu
+        x = max(4, min(self.W - MENU_W - 4, x))
+        y = max(4, min(self.PANEL_H - h - 4, y))
+        return x, y, MENU_W, h
+
+    def menu_row_y(self, i):
+        _, y, _, _ = self.menu_rect()
+        return y + MENU_PAD + i * MENU_ROW + (9 if i == len(MENU_TOGGLES) else 0)
+
+    def menu_hit(self, px, py):
+        """Row index at panel point (px, py), None outside the menu."""
+        x, y, w, h = self.menu_rect()
+        if not (x <= px <= x + w and y <= py <= y + h):
+            return None
+        for i in range(len(MENU_TOGGLES) + 1):
+            ry = self.menu_row_y(i)
+            if ry <= py < ry + MENU_ROW:
+                return i
+        return None
+
+    def draw_menu(self, cr):
+        x, y, w, h = self.menu_rect()
+        rounded_rect(cr, x + 2, y + 3, w, h, 10)  # shadow
+        cr.set_source_rgba(0, 0, 0, 0.35)
+        cr.fill()
+        rounded_rect(cr, x, y, w, h, 10)
+        cr.set_source_rgba(0.10, 0.11, 0.14, 0.97)
+        cr.fill_preserve()
+        cr.set_line_width(1)
+        cr.set_source_rgba(1, 1, 1, 0.12)
+        cr.stroke()
+        for i in range(len(MENU_TOGGLES) + 1):
+            ry = self.menu_row_y(i)
+            if i == self.menu_hover:
+                rounded_rect(cr, x + 4, ry, w - 8, MENU_ROW, 6)
+                cr.set_source_rgba(1, 1, 1, 0.08)
+                cr.fill()
+            if i == len(MENU_TOGGLES):
+                cr.set_source_rgba(1, 1, 1, 0.1)
+                cr.rectangle(x + 10, ry - 5, w - 20, 1)
+                cr.fill()
+                text(cr, "Close overlay", x + 14, ry + 15, 12, RED,
+                     cairo.FONT_WEIGHT_NORMAL, "left")
+                continue
+            key, label = MENU_TOGGLES[i]
+            on = self.show[key]
+            bx, by = x + 12, ry + 5
+            rounded_rect(cr, bx, by, 12, 12, 3)
+            if on:
+                cr.set_source_rgba(*GREEN, 1)
+                cr.fill()
+                cr.set_source_rgba(0.07, 0.08, 0.10, 1)
+                cr.set_line_width(1.8)
+                cr.set_line_cap(cairo.LINE_CAP_ROUND)
+                cr.move_to(bx + 2.8, by + 6.2)
+                cr.line_to(bx + 5.2, by + 8.6)
+                cr.line_to(bx + 9.4, by + 3.6)
+                cr.stroke()
+            else:
+                cr.set_source_rgba(1, 1, 1, 0.35)
+                cr.set_line_width(1.2)
+                cr.stroke()
+            text(cr, label, bx + 20, ry + 15, 12, TEXT if on else DIM,
+                 cairo.FONT_WEIGHT_NORMAL, "left")
+
+    def open_menu(self, px, py):
+        self.menu, self.menu_hover = (px, py), None
+        self.queue_draw()
+
+    def close_menu(self):
+        self.menu, self.menu_hover = None, None
+        self.menu_closed_at = time.monotonic()
+        self.queue_draw()
+
+    def menu_busy(self):
+        """True while the menu is open or was just closed by a click, so that
+        click doesn't also start a drag."""
+        return self.menu is not None or time.monotonic() - self.menu_closed_at < 0.4
+
+    def on_menu_click(self, row):
+        """Returns True when the overlay should close."""
+        if row == len(MENU_TOGGLES):
+            return True
+        key = MENU_TOGGLES[row][0]
+        self.show[key] = not self.show[key]
+        save_json(SETTINGS_FILE, self.show)
+        self.queue_draw()
+        return False
+
     def draw(self, _area, cr, w, _h):
         cr.set_operator(cairo.OPERATOR_SOURCE)
         cr.set_source_rgba(0, 0, 0, 0)
@@ -1046,7 +1177,7 @@ class Gauge(Gtk.DrawingArea):
         flash = frac > 0.97 and int(now * 12) % 2 == 0
         # flags take over the lights unless you are about to hit the limiter
         leds = None
-        flag_on = flag == F_CHEQUERED or self.flags.active(now)
+        flag_on = self.show["flags"] and (flag == F_CHEQUERED or self.flags.active(now))
         if frac < 0.9 and flag_on:
             leds = flag_leds(flag, now, n)
         lw, gap = 14, 3
@@ -1137,7 +1268,7 @@ class Gauge(Gtk.DrawingArea):
         # clutch / brake / throttle fill their arcs anticlockwise
         cr.set_line_cap(cairo.LINE_CAP_ROUND)
         for pr, val, col in zip(self.PEDAL_R, (clu, brk, thr), (CYAN, RED, GREEN)):
-            if val > 0.01:
+            if self.show["pedals"] and val > 0.01:
                 cr.new_path()
                 cr.set_line_width(3)
                 cr.set_source_rgba(*col, 1)
@@ -1156,6 +1287,8 @@ class Gauge(Gtk.DrawingArea):
             (oil_p / OIL_PRESSURE_MAX, (RED, 1.0) if p_low else (DIM, 0.55)),
         )
         for pr, (val, (col, alpha)) in zip(self.PEDAL_R, engine):
+            if not self.show["engine"]:
+                break
             val = max(0.0, min(1.0, val))
             if p_low and pr == self.PEDAL_R[2]:
                 val = max(val, 0.04)  # keep a visible red stub at zero pressure
@@ -1170,12 +1303,17 @@ class Gauge(Gtk.DrawingArea):
         # tyres, with the brake discs inboard on the axle lines
         tw, th = 34, 54
         lx, rx = self.TYRE_X
-        self.draw_damage(cr, lx + tw, rx, susp_dmg, aero_dmg, engine_dmg)
+        if self.show["damage"]:
+            self.draw_damage(cr, lx + tw, rx, susp_dmg, aero_dmg, engine_dmg)
+        else:
+            brake_dmg = [0.0] * 4
         for i, (tx, ty) in enumerate(((lx, 51), (rx, 51), (lx, 133), (rx, 133))):
             draw_tyre(cr, tx, ty, tw, th, tyre_temp[i], tyre_hud_temp[i], tyre_wear[i],
                       self.tyre_opt)
         for i, (bx, by) in enumerate(((lx + tw, 78), (rx, 78),
                                       (lx + tw, 160), (rx, 160))):
+            if not self.show["brakes"]:
+                break
             # caliper at the back of the front discs, the front of the rears,
             # tilted out towards the wheel
             base = math.pi / 2 if i < 2 else -math.pi / 2
@@ -1183,7 +1321,8 @@ class Gauge(Gtk.DrawingArea):
             draw_brake(cr, bx, by, brake_temp[i], caliper=base + tilt,
                        damage=brake_dmg[i])
 
-        self.draw_radar(cr, radar if live else ())
+        if self.show["radar"]:
+            self.draw_radar(cr, radar if live else ())
 
         if not live:
             text(cr, "waiting for AMS2 UDP…", self.W / 2, self.PANEL_H - 10, 10, DIM,
@@ -1194,6 +1333,9 @@ class Gauge(Gtk.DrawingArea):
             cr.set_line_width(2)
             cr.set_source_rgba(1, 1, 1, 0.6)
             cr.stroke()
+
+        if self.menu:
+            self.draw_menu(cr)
 
         # keep redrawing only while something is moving on its own
         fl = self.flags
@@ -1214,9 +1356,10 @@ class Gauge(Gtk.DrawingArea):
 CSS = b"window, .background { background: transparent; }"
 
 
-POS_FILE = os.path.join(
-    os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")),
-    "ams2-overlay", "position.json")
+CONFIG_DIR = os.path.join(
+    os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "ams2-overlay")
+POS_FILE = os.path.join(CONFIG_DIR, "position.json")
+SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
 HOLD_MS = 350  # press and hold this long before the panel follows the pointer
 DEBUG = bool(os.environ.get("AMS2_OVERLAY_DEBUG"))
 
@@ -1253,21 +1396,12 @@ class Mover:
         return self.args.output or "default"
 
     def load(self):
-        try:
-            with open(POS_FILE) as f:
-                return json.load(f)
-        except (OSError, ValueError):
-            return {}
+        return load_json(POS_FILE)
 
     def save(self):
         data = self.load()
         data[self.key()] = list(self.pos)
-        try:
-            os.makedirs(os.path.dirname(POS_FILE), exist_ok=True)
-            with open(POS_FILE, "w") as f:
-                json.dump(data, f)
-        except OSError as e:
-            print(f"could not save position: {e}", file=sys.stderr)
+        save_json(POS_FILE, data)
 
     def set_anchors(self, top, left, bottom, right):
         E = LayerShell.Edge
@@ -1300,6 +1434,8 @@ class Mover:
         return (mw - w) // 2, top
 
     def on_begin(self, _gesture, x, y):
+        if self.gauge.show["locked"] or self.gauge.menu_busy():
+            return
         self.grab = (x, y)
         self.held = GLib.timeout_add(HOLD_MS, self.on_hold)
 
@@ -1398,10 +1534,33 @@ def on_activate(app, args, tel):
 
     if LayerShell and LayerShell.is_supported():
         Mover(win, args)
-    # right click closes the overlay
-    close = Gtk.GestureClick(button=3)
-    close.connect("released", lambda *_: app.quit())
-    win.get_child().add_controller(close)
+    # right click opens the menu; a left click picks a row or closes it
+    gauge = win.get_child()
+
+    def on_click(gesture, _n, x, y):
+        px, py = x / gauge.scale, y / gauge.scale
+        if gesture.get_current_button() == 3:
+            gauge.open_menu(px, py)
+        elif gauge.menu:
+            row = gauge.menu_hit(px, py)
+            if row is None:
+                gauge.close_menu()
+            elif gauge.on_menu_click(row):
+                app.quit()
+
+    def on_motion(_ctl, x, y):
+        if gauge.menu:
+            row = gauge.menu_hit(x / gauge.scale, y / gauge.scale)
+            if row != gauge.menu_hover:
+                gauge.menu_hover = row
+                gauge.queue_draw()
+
+    click = Gtk.GestureClick(button=0)
+    click.connect("pressed", on_click)
+    gauge.add_controller(click)
+    motion = Gtk.EventControllerMotion()
+    motion.connect("motion", on_motion)
+    gauge.add_controller(motion)
     win.present()
 
 
